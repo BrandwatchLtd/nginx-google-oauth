@@ -27,8 +27,6 @@ local set_user          = ngx.var.ngo_user or false
 local set_email         = ngx.var.ngo_email or false
 local set_name          = ngx.var.ngo_name or false
 local email_as_user     = ngx.var.ngo_email_as_user == "true" or false
-local sa_json_file      = ngx.var.ngo_service_account_json_file or false
-local org_admin_email   = ngx.var.ngo_organization_admin_email or false
 local set_groups        = ngx.var.ngo_groups or false
 local allowed_groups    = ngx.var.ngo_allowed_groups or ""
 
@@ -164,68 +162,24 @@ local function request_access_token(code)
   return json.decode(res.body)
 end
 
-local function base64url(text)
-  return ngx.encode_base64(text):gsub("+", "-"):gsub("/", "_")
-end
 
-local function request_groups(email)
-  if not ( sa_json_file and org_admin_email ) then
-    return ""
-  end
-
-  local digest = require("openssl.digest")
-  local pkey = require("openssl.pkey")
-
-  local json_file = io.open(sa_json_file, "r")
-  if json_file then
-    service_account = json.decode(json_file:read("*a"))
-    io.close(json_file)
-  else
-    ngx.log(ngx.ERR, "failed to open service account JSON file: " .. sa_json_file)
-    return ""
-  end
-
-  local now = os.time()
-  local header = '{"alg":"RS256","typ":"JWT"}'
-  local claims = '{"iss":"' .. service_account["client_email"] .. '","sub":"' .. org_admin_email .. '", "scope":"https://www.googleapis.com/auth/admin.directory.user.readonly https://www.googleapis.com/auth/admin.directory.group.readonly https://www.googleapis.com/auth/admin.directory.group.member.readonly", "aud":"https://www.googleapis.com/oauth2/v4/token","exp":' .. now + 300 .. ', "iat":' .. now .. '}'
-  local signature = pkey.new(service_account["private_key"]):sign(digest.new("sha256"):update(base64url(header) .. "." .. base64url(claims)))
-  local assertion = base64url(header) .. "." .. base64url(claims) .. "." .. base64url(signature)
-
+local function request_directory_custom_groups(token, email)
   local request = http.new()
+
   request:set_timeout(7000)
-  local res, err = request:request_uri("https://www.googleapis.com/oauth2/v4/token", {
-    method = "POST",
-    body = ngx.encode_args({
-      assertion  = assertion,
-      grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    }),
+
+  local res, err = request:request_uri("https://www.googleapis.com/admin/directory/v1/users/" .. email .. "?projection=full&viewType=domain_public", {
     headers = {
-      ["Content-type"] = "application/x-www-form-urlencoded"
+      ["Authorization"] = "Bearer " .. token,
     },
     ssl_verify = true,
   })
   if not res then
-    return nil, (err or "domain auth token request failed: " .. (err or "unknown reason"))
-  end
-  if res.status ~= 200 then
-    return nil, "received " .. res.status .. " from https://www.googleapis.com/oauth2/v4/token: " .. res.body
-  end
-  access_token = json.decode(res.body)['access_token']
-
-  local request = http.new()
-  request:set_timeout(7000)
-  local res, err = request:request_uri("https://www.googleapis.com/admin/directory/v1/users/" .. email .. "?projection=full", {
-    headers = {
-      ["Authorization"] = "Bearer " .. access_token,
-    },
-    ssl_verify = true,
-  })
-  if not res then
-    return nil, "user directory details request failed: " .. (err or "unknown reason")
+    return nil, "auth info request failed: " .. (err or "unknown reason")
   end
 
   if res.status ~= 200 then
-    return nil, "received " .. res.status .. " from https://www.googleapis.com/admin/directory/v1/users/" .. email .. "?projection=full"
+    return nil, "received " .. res.status .. " from https://www.googleapis.com/admin/directory/v1/users/" .. email .. "?projection=full&viewType=domain_public"
   end
 
   local user_details = json.decode(res.body)
@@ -302,7 +256,7 @@ local function redirect_to_auth()
   -- google seems to accept space separated domain list in the login_hint, so use this undocumented feature.
   return ngx.redirect("https://accounts.google.com/o/oauth2/auth?" .. ngx.encode_args({
     client_id     = client_id,
-    scope         = "email profile",
+    scope         = "email profile https://www.googleapis.com/auth/admin.directory.user.readonly",
     response_type = "code",
     redirect_uri  = cb_url,
     state         = redirect_url,
@@ -344,7 +298,7 @@ local function authorize()
   local email      = profile["email"]
   local name       = profile["name"]
 
-  local groups, groups_err = request_groups(email)
+  local groups, groups_err = request_directory_custom_groups(token["access_token"], email)
   if not groups then
     ngx.log(ngx.ERR, "got error during groups request: " .. groups_err)
     groups = ""

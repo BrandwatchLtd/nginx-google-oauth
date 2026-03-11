@@ -184,8 +184,10 @@ local function request_directory_custom_groups(token, email)
 
   local user_details = json.decode(res.body)
   local groups = ""
-  for i, group in ipairs(user_details["customSchemas"]["BW_SAML"]["bwUserGroups"]) do
-    groups = groups .. " " .. group["value"]
+  if user_details["customSchemas"] ~= nil and user_details["customSchemas"]["BW_SAML"] ~= nil and user_details["customSchemas"]["BW_SAML"]["bwUserGroups"] ~= nil then
+    for i, group in ipairs(user_details["customSchemas"]["BW_SAML"]["bwUserGroups"]) do
+      groups = groups .. " " .. group["value"]
+    end
   end
 
   return groups
